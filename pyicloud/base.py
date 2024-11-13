@@ -61,6 +61,8 @@ class PyiCloudPasswordFilter(logging.Filter):
 class PyiCloudSession(Session):
     """iCloud session."""
 
+    LOGGER.debug("Starting up PyiCloudSession")
+
     def __init__(self, service):
         self.service = service
         super().__init__()
@@ -215,7 +217,15 @@ class PyiCloudService:
         verify=True,
         client_id=None,
         with_family=True,
+        china_mainland=False,
     ):
+        # If the country or region setting of your Apple ID is China mainland.
+        # See https://support.apple.com/en-us/HT208351
+        if china_mainland:
+            self.AUTH_ENDPOINT = "https://idmsa.apple.com.cn/appleauth/auth"
+            self.HOME_ENDPOINT = "https://www.icloud.com.cn"
+            self.SETUP_ENDPOINT = "https://setup.icloud.com.cn/setup/ws/1"
+
         if password is None:
             password = get_password_from_keyring(apple_id)
 
@@ -224,6 +234,8 @@ class PyiCloudService:
         self.params = {}
         self.client_id = client_id or ("auth-%s" % str(uuid1()).lower())
         self.with_family = with_family
+
+        LOGGER.debug("Starting up PyiCloudService")
 
         self.password_filter = PyiCloudPasswordFilter(password)
         LOGGER.addFilter(self.password_filter)
@@ -310,6 +322,7 @@ class PyiCloudService:
             LOGGER.debug("Authenticating as %s", self.user["accountName"])
 
             headers = self._get_auth_headers()
+
             if self.session_data.get("scnt"):
                 headers["scnt"] = self.session_data.get("scnt")
 
@@ -319,14 +332,19 @@ class PyiCloudService:
             class SrpPassword():
                 def __init__(self, password: str):
                     self.password = password
-                def set_encrypt_info(self, salt: bytes, iterations: int, key_length: int):
+                def set_encrypt_info(self, salt: bytes, iterations: int, key_length: int, protocol: str):
                     self.salt = salt
                     self.iterations = iterations
                     self.key_length = key_length
+                    self.protocol = protocol
                 def encode(self):
-                    password_hash = hashlib.sha256(self.password.encode('utf-8')).digest()
+                    LOGGER.debug("Using protocol  %s", self.protocol)
+                    if (self.protocol == 's2k_fo'):
+                        password_hash = hashlib.sha256(self.password.encode('utf-8')).hexdigest()[:-1]
+                    else:
+                        password_hash = hashlib.sha256(self.password.encode('utf-8')).digest()
                     return hashlib.pbkdf2_hmac('sha256', password_hash, salt, iterations, key_length)
-                    
+
             srp_password = SrpPassword(self.user["password"])
             srp.rfc5054_enable()
             srp.no_username_in_x()
@@ -337,21 +355,22 @@ class PyiCloudService:
                 'accountName': uname,
                 'protocols': ['s2k', 's2k_fo']
             }
-            
+
             try:
                 response = self.session.post("%s/signin/init" % self.AUTH_ENDPOINT, data=json.dumps(data), headers=headers)
                 response.raise_for_status()
             except PyiCloudAPIResponseException as error:
                 msg = "Failed to initiate srp authentication."
                 raise PyiCloudFailedLoginException(msg, error) from error
-                
+
             body = response.json()
             salt = base64.b64decode(body['salt'])
             b = base64.b64decode(body['b'])
             c = body['c']
             iterations = body['iteration']
+            protocol = body['protocol']
             key_length = 32
-            srp_password.set_encrypt_info(salt, iterations, key_length)
+            srp_password.set_encrypt_info(salt, iterations, key_length, protocol)
             m1 = usr.process_challenge( salt, b )
             m2 = usr.H_AMK
             data = {
@@ -364,7 +383,7 @@ class PyiCloudService:
             }
             if self.session_data.get("trust_token"):
                 data["trustTokens"] = [self.session_data.get("trust_token")]
-                
+            
             try:
                 self.session.post(
                     "%s/signin/complete" % self.AUTH_ENDPOINT,
