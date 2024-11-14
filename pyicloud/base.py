@@ -362,6 +362,8 @@ class PyiCloudService:
             except PyiCloudAPIResponseException as error:
                 msg = "Failed to initiate srp authentication."
                 raise PyiCloudFailedLoginException(msg, error) from error
+            except Exception as e:
+                LOGGER.error("SRP Authentication failed: %s", e)
 
             body = response.json()
             salt = base64.b64decode(body['salt'])
